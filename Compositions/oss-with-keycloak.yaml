@@ -1,0 +1,855 @@
+# Copyright Navteca, LLC. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+# This is the OSS Composition for the OSS with Keycloak as an authenticator
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: oss-with-keycloak.navteca.io
+  # We will match these labels in the claim, based on claim matches 
+  # we can select one different compositions that expose diff configurations
+  labels:
+    navteca.io/provider: aws
+    navteca.io/environment: oss
+    oss.navteca.io/configuration: keycloak
+    oss.navteca.io/version: v1
+spec:
+  writeConnectionSecretsToNamespace: crossplane-system
+  compositeTypeRef:
+    apiVersion: navteca.io/v1alpha1
+    kind: XOSSObject
+  patchSets:
+    - name: common-fields
+      patches:
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.resourceConfig.deletionPolicy
+          toFieldPath: spec.deletionPolicy
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.resourceConfig.name
+          toFieldPath: metadata.annotations[crossplane.io/external-name]
+    #this pathset creates the provider config based on the cloud account and cluster name
+    - name: optional-fields
+      patches:
+        - type: CombineFromComposite
+          combine:
+            variables:
+            - fromFieldPath: spec.project.cloudAccount
+            - fromFieldPath: spec.project.clusterName
+            strategy: string
+            string:
+              fmt: "%s-%s"
+          toFieldPath: spec.providerConfigRef.name      
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.resourceConfig.region
+          toFieldPath: spec.forProvider.region
+  resources:
+    - name: s3-bucket-shared
+      base:
+        apiVersion: s3.aws.crossplane.io/v1beta1
+        kind: Bucket
+        spec:
+          #deletionPolicy: Delete
+          forProvider:
+            objectOwnership: BucketOwnerEnforced
+            publicAccessBlockConfiguration:
+              blockPublicAcls: true
+              blockPublicPolicy: true
+              ignorePublicAcls: true
+              restrictPublicBuckets: true
+            serverSideEncryptionConfiguration:
+              rules:
+                - applyServerSideEncryptionByDefault:
+                    sseAlgorithm: AES256
+      patches:
+        - type: PatchSet
+          patchSetName: common-fields
+        - type: PatchSet
+          patchSetName: optional-fields
+        - type: CombineFromComposite
+          combine:
+            variables:
+            - fromFieldPath: spec.project.cloudAccount
+            - fromFieldPath: spec.project.name
+            strategy: string
+            string:
+              fmt: "%s-%s-shared"
+          toFieldPath: metadata.name
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.resourceConfig.tags
+          toFieldPath: spec.forProvider.tagging.tagSet
+          policy:
+            mergeOptions:
+              appendSlice: true
+              keepMapValues: true
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.resourceConfig.region
+          toFieldPath: spec.forProvider.locationConstraint
+        - type: ToCompositeFieldPath
+          fromFieldPath: metadata.annotations[crossplane.io/external-name]
+          toFieldPath: status.bucketName
+        - type: ToCompositeFieldPath
+          fromFieldPath: status.atProvider.arn
+          toFieldPath: status.bucketArn
+# This section creates the policy and role for the bucket and attaches the policy to the role. It also creates the service account and attaches the role to the service account.
+    - name: oss-s3-policy
+      base:
+        apiVersion: iam.aws.crossplane.io/v1beta1
+        kind: Policy
+        spec:
+        #it is my understanding this is already set to delete by default and also it comes from common-fields
+          #deletionPolicy: Delete
+          forProvider:
+            name: ""
+            document: ""
+      patches:
+        - type: PatchSet
+          patchSetName: common-fields
+        - type: PatchSet
+          patchSetName: optional-fields
+        - type: ToCompositeFieldPath
+          fromFieldPath: status.atProvider.arn
+          toFieldPath: status.policyArn
+        - fromFieldPath: spec.project.name
+          toFieldPath: spec.forProvider.name
+          transforms:
+            - type: string
+              string:
+                fmt: "%s-oss-s3access"
+        # this captures the aws account id from arn stores it as part of the status object.
+        # AWS account id is needed to create the policy document                
+        - type: ToCompositeFieldPath
+          toFieldPath: status.awsAccountId
+          fromFieldPath: status.atProvider.arn
+          transforms:
+            - type: string
+              string:
+                type: Regexp
+                regexp:
+                  match: 'arn:aws:iam::(\d+):.*'
+                  group: 1  # Optional capture group. Omit to match the entire regexp.
+        - type: CombineFromComposite
+          toFieldPath: spec.forProvider.document
+          combine:
+            variables:
+            - fromFieldPath: spec.project.cloudAccount
+            - fromFieldPath: spec.project.name
+            - fromFieldPath: spec.project.cloudAccount
+            - fromFieldPath: spec.project.name
+            strategy: string
+            string:
+              fmt: |
+                  {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "s3:PutObject",
+                                "s3:GetObject",
+                                "s3:ListBucketMultipartUploads",
+                                "s3:AbortMultipartUpload",
+                                "s3:ListBucketVersions",
+                                "s3:CreateBucket",
+                                "s3:ListBucket",
+                                "s3:DeleteObject",
+                                "s3:GetBucketLocation",
+                                "s3:ListMultipartUploadParts"
+                            ],
+                            "Resource": [
+                                "arn:aws:s3:::%s-%s-shared",
+                                "arn:aws:s3:::%s-%s-shared/*"
+                            ]
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": "s3:ListAllMyBuckets",
+                            "Resource": "*"
+                        }
+                    ]
+                  }
+    - name: oss-s3-role
+      base:
+        apiVersion: iam.aws.crossplane.io/v1beta1
+        kind: Role
+        metadata:
+          labels:
+            role: oss-s3-eks-serv-account
+        spec:
+          forProvider:
+            assumeRolePolicyDocument: |
+                 {
+                  
+                 }
+      patches:
+        - type: PatchSet
+          patchSetName: common-fields
+        - type: PatchSet
+          patchSetName: optional-fields
+        - type: ToCompositeFieldPath
+          fromFieldPath: status.atProvider.arn
+          toFieldPath: status.roleArnAS
+        - type: ToCompositeFieldPath
+          fromFieldPath: status.atProvider.roleID
+          toFieldPath: status.roleNameAS
+        - type: CombineFromComposite
+          combine:
+            variables:
+            - fromFieldPath: status.awsAccountId
+            - fromFieldPath: spec.resourceConfig.region
+            - fromFieldPath: "spec.parameters.oidcProviderID"
+            - fromFieldPath: spec.resourceConfig.region            
+            - fromFieldPath: "spec.parameters.oidcProviderID"
+            - fromFieldPath: spec.resourceConfig.region            
+            - fromFieldPath: "spec.parameters.oidcProviderID"
+            - fromFieldPath: "spec.project.name"
+            - fromFieldPath: "spec.project.name"
+            strategy: string
+            string:
+              fmt: |
+                 {
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                  "Effect": "Allow",
+                  "Principal": {
+                  "Federated": "arn:aws:iam::%s:oidc-provider/oidc.eks.%s.amazonaws.com/id/%s"
+                  },
+                 "Action": "sts:AssumeRoleWithWebIdentity",
+                 "Condition": {
+                  "StringEquals": {
+                  "oidc.eks.%s.amazonaws.com/id/%s:aud": "sts.amazonaws.com",
+                  "oidc.eks.%s.amazonaws.com/id/%s:sub": "system:serviceaccount:oss-%s:oss-%s-s3-serv-account"
+                                   }
+                              }
+                    }]
+                 }
+          toFieldPath: spec.forProvider.assumeRolePolicyDocument
+          policy:
+            fromFieldPath: Required
+        - type: ToCompositeFieldPath
+          fromFieldPath: status.atProvider.arn
+          toFieldPath: status.roleArnS3
+        - type: ToCompositeFieldPath
+          fromFieldPath: status.atProvider.roleID
+          toFieldPath: status.roleNameS3            
+    - name: oss-s3-role-policy-attachment
+      base:
+        apiVersion: iam.aws.crossplane.io/v1beta1
+        kind: RolePolicyAttachment
+        spec:
+          forProvider:
+            policyArn: ""
+            roleNameSelector:
+              matchControllerRef: true
+              matchLabels:
+                role: oss-s3-eks-serv-account
+      patches:
+        - type: PatchSet
+          patchSetName: common-fields
+        - type: PatchSet
+          patchSetName: optional-fields
+        - type: FromCompositeFieldPath
+          fromFieldPath: status.policyArn
+          toFieldPath: spec.forProvider.policyArn
+
+#This sections create kubernetes needed objects, like OSS Namespace and OSS Service Accounts
+#https://github.com/crossplane-contrib/provider-kubernetes/blob/main/examples/object/object.yaml
+
+#create a namespace for the OSS
+    - name: oss-namespace
+      base:
+        apiVersion: kubernetes.crossplane.io/v1alpha1
+        kind: Object
+        spec:
+          #deletionPolicy: Delete
+          forProvider:
+            manifest:
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: oss-project-name
+              labels:
+                app.kubernetes.io/managed-by: crossplane
+      patches:
+        - type: PatchSet
+          patchSetName: common-fields
+        - type: PatchSet
+          patchSetName: optional-fields
+        - fromFieldPath: spec.project.name
+          toFieldPath: spec.forProvider.manifest.metadata.name
+          transforms:
+            - type: string
+              string:
+                fmt: "oss-%s"
+
+#create a service account for the OSS
+# service account for the AutoScaler
+
+# Service account for the S3
+    - name: oss-servacct-s3
+      base:
+        apiVersion: kubernetes.crossplane.io/v1alpha1
+        kind: Object
+        spec:
+          forProvider:
+            manifest:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                annotations:
+                  eks.amazonaws.com/role-arn: arn
+                labels:
+                  app.kubernetes.io/managed-by: crossplane
+                name: oss-project-s3-serv-account
+                namespace: oss-projectname 
+      patches:
+        - type: PatchSet
+          patchSetName: common-fields
+        - type: PatchSet
+          patchSetName: optional-fields
+        - type: FromCompositeFieldPath
+          fromFieldPath: status.roleArnS3
+          toFieldPath: spec.forProvider.manifest.metadata.annotations[eks.amazonaws.com/role-arn]
+          policy:
+            fromFieldPath: Required
+        - fromFieldPath: "spec.project.name"
+          toFieldPath: spec.forProvider.manifest.metadata.name
+          transforms:
+            - type: string
+              string:
+                fmt: "oss-%s-s3-serv-account"
+        - fromFieldPath: spec.project.name
+          toFieldPath: spec.forProvider.manifest.metadata.namespace
+          transforms:
+            - type: string
+              string:
+                fmt: "oss-%s"
+
+#deployes configmap with fix values and secrets
+    - name: oss-base-chart-values
+      base:
+        apiVersion: kubernetes.crossplane.io/v1alpha1
+        kind: Object
+        spec:
+          forProvider:
+            manifest:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: base-oss-config
+                namespace: oss-project-name
+              data:
+                oss-config-fix.yaml: |-
+                  jupyterhub:
+                    cull:
+                      enabled: true
+                      timeout: 3600
+                      every: 300
+                    singleuser:
+                      #uid: 0
+                      #fsGid: 0
+                      allowPrivilegeEscalation: true
+                      startTimeout: 600
+                      profileList:
+                      - display_name: "Open Science Studio"
+                        default: true
+                        profile_options:
+                          server_type:
+                            display_name: "Server Type"
+                            description: "CPU and memory sizes for the server."
+                            choices:
+                              01-standard:
+                                display_name: "Standard - 1GB RAM/1 CPU reserved. Up to 4GB RAM/4 CPU as needed."
+                                kubespawner_override:
+                                  mem_guarantee: 1G
+                                  mem_limit: 4G
+                                  cpu_guarantee: 1
+                                  cpu_limit: 4
+                                default: true  
+                              02-large:
+                                display_name: "Large - 2GB RAM/2 CPU reserved. Up to 8GB RAM/4 CPU as needed."
+                                kubespawner_override:
+                                  mem_guarantee: 2G
+                                  mem_limit: 8G
+                                  cpu_guarantee: 2
+                                  cpu_limit: 4
+                              03-xlarge:
+                                display_name: "Extra Large - 16GB RAM/4 CPU reserved."
+                                kubespawner_override:
+                                  mem_guarantee: 13G
+                                  mem_limit: 16G
+                                  cpu_guarantee: 3
+                                  cpu_limit: 4
+                          image_type:
+                            display_name: Images 
+                            description: "Image type for the Notebook server."
+                            choices:
+                              01-es-server:
+                                display_name: Earth Science Server  
+                                kubespawner_override:
+                                  image: "pangeo/pangeo-notebook:latest"
+  
+                      cpu:
+                        guarantee: 1
+                        limit: 4
+                      memory:
+                        guarantee: 1G
+                        limit: 4G
+                      extraEnv:
+                        DASK_GATEWAY__CLUSTER__OPTIONS__IMAGE: '{JUPYTER_IMAGE_SPEC}'
+                      serviceAccountName: oss-service-account-role
+                    proxy:
+                      chp:
+                        nodeSelector:
+                          lifecycle: OnDemand
+                      https:
+                        enabled: true
+                        hosts:
+                          - oss.example.com #gets overwritten by patches of conposition
+                        letsencrypt:
+                          contactEmail: contact@example.com
+                    hub:
+                      nodeSelector:
+                        lifecycle: OnDemand
+                      extraConfig:
+                        20-nojovyan: |-
+                          from oauthenticator.generic import GenericOAuthenticator
+                          class CustomGenAuthenticator(GenericOAuthenticator):
+                              from tornado import gen
+                              @gen.coroutine
+                              def pre_spawn_start(self, user, spawner):
+                                  auth_state = yield user.get_auth_state()
+                                  self.log.info('Auth State content: %s', auth_state)
+                                  if not auth_state:
+                                      self.log.info('Auth State not set to persists')
+                                      return                
+                          c.kubeSpawner.allowPrivilegeEscalation = True
+                          c.JupyterHub.authenticator_class = CustomGenAuthenticator
+                          #c.KubeSpawner.cmd= ['start-singleuser.sh']                          
+                      config:
+                        Authenticator:
+                          auto_login: true
+                          enable_auth_state: true
+                        GenericOAuthenticator:
+                          claim_groups_key: groups
+                          login_service: "keycloak"
+                          username_key: preferred_username
+                          userdata_params:
+                            state: state
+                          oauth_callback_url: https://oss.example.com/hub/oauth_callback
+                          authorize_url: https://oss-example.auth.us-west-2.amazoncognito.com/oauth2/authorize
+                          token_url: https://oss-example.auth.us-west-2.amazoncognito.com/oauth2/token
+                          userdata_url: https://oss-example.auth.us-west-2.amazoncognito.com/oauth2/userInfo
+                          scope:
+                            - openid
+                            - phone
+                            - profile
+                            - email
+                        JupyterHub:
+                          authenticator_class: generic-oauth
+                    # prePuller:
+                    #   extraImages:
+                    #     alpine:
+                    #       name: alpine
+                    #       tag: "3"
+                    scheduling:
+                      podPriority:
+                        enabled: true
+                      userPlaceholder:
+                        enabled: true
+                        replicas: 0 #Check with customer - If they want a "hot standby" instance, set this to 1 (or greater)
+                      userPods:
+                        nodeAffinity:
+                          matchNodePurpose: require
+                  dask-gateway:
+                    gateway:
+                      extraConfig:
+                        optionHandler: |
+                          from dask_gateway_server.options import Options, Integer, Float, String
+                          def cluster_options(user):
+                              def option_handler(options,user):
+                                  if ":" not in options.image:
+                                      raise ValueError("When specifying an image you must also provide a tag")
+                                  extra_annotations = {
+                                      "hub.jupyter.org/username": user.name,
+                                  }
+                                  extra_labels = {
+                                      "hub.jupyter.org/username": user.name,
+                                  }
+                                  return {
+                                      "worker_cores_limit": options.worker_cores,
+                                      "worker_cores": min(options.worker_cores / 2, 1),
+                                      "worker_memory": "%fG" % options.worker_memory,
+                                      "image": options.image,
+                                      "scheduler_extra_pod_annotations": extra_annotations,
+                                      "worker_extra_pod_annotations": extra_annotations,
+                                      "scheduler_extra_pod_labels": extra_labels,
+                                      "worker_extra_pod_labels": extra_labels,
+                                  }
+                              return Options(
+                                  Integer("worker_cores", 2, min=1, max=16, label="Worker Cores"),
+                                  Float("worker_memory", 4, min=1, max=32, label="Worker Memory (GiB)"),
+                                  String("image", default="pangeo/base-notebook:latest", label="Image"),
+                                  handler=option_handler,
+                              )
+                          c.Backend.cluster_options = cluster_options
+                        idle: |
+                          c.KubeClusterConfig.idle_timeout = 1800
+                      backend:
+                        worker:
+                          extraPodConfig:
+                            nodeSelector:
+                              lifecycle: Ec2Spot
+                            tolerations:
+                            - key: "hub.jupyter.org/dedicated"
+                              operator: "Equal"
+                              value: "user"
+                            automountServiceAccountToken: true
+                            securityContext:
+                              runAsGroup: 1000
+                              runAsUser: 1000
+                              fsGroup: 100
+                        scheduler:
+                          extraPodConfig:
+                            nodeSelector:
+                              lifecycle: Ec2Spot
+                            tolerations:
+                            - key: "hub.jupyter.org/dedicated"
+                              operator: "Equal"
+                              value: "user"
+                            securityContext:
+                              runAsGroup: 1000
+                              runAsUser: 1000
+                              fsGroup: 100
+          # this providerconfig for local UCP cluster has been created manually, we follow the patern of cloudaccount-clustername
+          # the configmaps for the helm charts values have to exist in the crossplane cluster that is deploying the chart
+          providerConfigRef:
+            name: oss-provider-config
+      patches:
+        - type: PatchSet
+          patchSetName: common-fields
+          # we dont add the optional 
+        - fromFieldPath: spec.project.name
+          toFieldPath: spec.forProvider.manifest.metadata.name
+          transforms:
+            - type: string
+              string:
+                fmt: "oss-base-chart-values-%s"
+        - fromFieldPath: metadata.labels[crossplane.io/claim-namespace]
+          toFieldPath: spec.forProvider.manifest.metadata.namespace
+    - name: oss-secret-chart-values
+      base:
+        apiVersion: kubernetes.crossplane.io/v1alpha1
+        kind: Object
+        spec:
+          forProvider:
+            manifest:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: secret-oss-config
+                namespace: oss-example
+              data:
+ # This secrets need to be autogenerated and stored in a secret in the cluster, can I use patch transform for that?              
+                oss-secrets.yaml: |-
+                  jupyterhub:
+                    proxy:
+                      secretToken: ${OSSSECRETTOKEN}
+                    hub:
+                      services:
+                        dask-gateway:
+                          apiToken: ${OSSAPITOKEN}
+                  dask-gateway:
+                    gateway:
+                      auth:
+                        jupyterhub:
+                          apiToken: ${OSSAPITOKEN}
+          # this providerconfig for local UCP cluster has been created manually as above
+          providerConfigRef:
+            name: oss-provider-config
+      patches:
+        - type: PatchSet
+          patchSetName: common-fields
+        - fromFieldPath: spec.project.name
+          toFieldPath: spec.forProvider.manifest.metadata.name
+          transforms:
+            - type: string
+              string:
+                fmt: "oss-secret-chart-values-%s"
+        - fromFieldPath: metadata.labels[crossplane.io/claim-namespace]
+          toFieldPath: spec.forProvider.manifest.metadata.namespace
+
+#deploy helm daskhub release
+    - name: oss-daskhub-chart
+      base:
+        apiVersion: helm.crossplane.io/v1beta1
+        kind: Release
+        metadata:
+          name: oss-example
+        spec:
+          forProvider:
+            chart:
+              name: daskhub
+              repository: https://helm.dask.org/
+              version: 2023.1.0
+            namespace: oss-project-name
+            valuesFrom:
+            # this configmap contains the general values for the daskhub chart, they usually dont change 
+            # from deployment to deployment in an organization
+              - configMapKeyRef:
+                  key: oss-config-fix.yaml
+                  name: daskhub2023-1-0
+                  namespace: project-namespace
+                  optional: false
+            # this configmap contains the secrets for the daskhub chart
+              - configMapKeyRef:
+                  key: oss-secrets.yaml
+                  name: oss-secrets
+                  namespace: project-namespace
+                  optional: false
+            values:
+              jupyterhub:
+                singleuser:
+                  storage: 
+                    capacity: 10Gi
+                  serviceAccountName: oss-service-account-role
+                proxy:
+                  service:
+                    annotations:
+                      external-dns.alpha.kubernetes.io/hostname: oss.example.com
+                  https:
+                    enabled: true
+                    hosts:
+                      - oss.example.com
+                    letsencrypt:
+                      contactEmail: contact@example.com
+                hub:
+                  config:
+                    GenericOAuthenticator:
+                      client_id: client_id
+                      client_secret: client_secret
+                      login_service: "AWS Cognito"
+                      oauth_callback_url: https://oss.example.com/hub/oauth_callback
+                      authorize_url: https://keycloak.example.com/realms/oss/protocol/openid-connect/auth
+                      token_url: https://keycloak.example.com/realms/oss/protocol/openid-connect/token
+                      userdata_url: https://keycloak.example.com/realms/oss/protocol/openid-connect/userinfo
+                      #this should be patch from the value provided in the claim
+                      allowed_groups:
+                        - group-name
+                    JupyterHub:
+                      authenticator_class: generic-oauth
+      patches:
+        - type: PatchSet
+          patchSetName: common-fields
+        - type: PatchSet
+          patchSetName: optional-fields
+        - type: CombineFromComposite
+          combine:
+            variables:
+            - fromFieldPath: spec.project.name
+            - fromFieldPath: spec.parameters.domainName
+            strategy: string
+            string:
+              fmt: "%s.%s"
+          toFieldPath: spec.forProvider.values.jupyterhub.proxy.service.annotations[external-dns.alpha.kubernetes.io/hostname]
+        - fromFieldPath: spec.project.name
+          toFieldPath: spec.forProvider.namespace
+          transforms:
+            - type: string
+              string:
+                fmt: "oss-%s"
+        - fromFieldPath: metadata.labels[crossplane.io/claim-namespace]
+          toFieldPath: spec.forProvider.valuesFrom[0].configMapKeyRef.namespace
+        - fromFieldPath: metadata.labels[crossplane.io/claim-namespace]
+          toFieldPath: spec.forProvider.valuesFrom[1].configMapKeyRef.namespace
+        - fromFieldPath: spec.project.name
+          toFieldPath: spec.forProvider.valuesFrom[0].configMapKeyRef.name
+          transforms:
+            - type: string
+              string:
+                fmt: "oss-base-chart-values-%s"
+        - fromFieldPath: spec.project.name
+          toFieldPath: spec.forProvider.valuesFrom[1].configMapKeyRef.name
+          transforms:
+            - type: string
+              string:
+                fmt: "oss-secret-chart-values-%s"
+        - fromFieldPath: spec.project.name
+          toFieldPath: spec.forProvider.values.jupyterhub.singleuser.serviceAccountName
+          transforms:
+            - type: string
+              string:
+                fmt: "oss-%s-s3-serv-account"
+        - fromFieldPath: spec.parameters.notebookSize
+          toFieldPath: spec.forProvider.values.jupyterhub.singleuser.storage.capacity
+        - type: CombineFromComposite
+          combine:
+            variables:
+            - fromFieldPath: spec.project.name
+            - fromFieldPath: spec.parameters.domainName
+            strategy: string
+            string:
+              fmt: "%s.%s"
+          toFieldPath: spec.forProvider.values.jupyterhub.proxy.https.hosts[0]
+          policy:
+            fromFieldPath: Required
+        - fromFieldPath: spec.project.contactEmail
+          toFieldPath: spec.forProvider.values.jupyterhub.proxy.https.letsencrypt.contactEmail
+        - type: CombineFromComposite
+          combine:
+            variables:
+            - fromFieldPath: spec.project.name
+            - fromFieldPath: spec.parameters.domainName
+            strategy: string
+            string:
+              fmt: "https://%s.%s/hub/oauth_callback"
+          toFieldPath: spec.forProvider.values.jupyterhub.hub.config.GenericOAuthenticator.oauth_callback_url
+          policy:
+            fromFieldPath: Required
+        - fromFieldPath: spec.parameters.cognitoDomain
+          toFieldPath: spec.forProvider.values.jupyterhub.hub.config.GenericOAuthenticator.authorize_url
+          transforms:
+            - type: string
+              string:
+                fmt: "https://%s/protocol/openid-connect/auth"
+        - fromFieldPath: spec.parameters.cognitoDomain
+          toFieldPath: spec.forProvider.values.jupyterhub.hub.config.GenericOAuthenticator.token_url
+          transforms:
+            - type: string
+              string:
+                fmt: "https://%s/protocol/openid-connect/token"
+        - fromFieldPath: spec.parameters.cognitoDomain
+          toFieldPath: spec.forProvider.values.jupyterhub.hub.config.GenericOAuthenticator.userdata_url
+          transforms:
+            - type: string
+              string:
+                fmt: "https://%s/protocol/openid-connect/userinfo"
+        - fromFieldPath: spec.parameters.keycloakClientID
+          toFieldPath: spec.forProvider.values.jupyterhub.hub.config.GenericOAuthenticator.client_id
+        - fromFieldPath: spec.parameters.keycloakClientSecret
+          toFieldPath: spec.forProvider.values.jupyterhub.hub.config.GenericOAuthenticator.client_secret
+        - fromFieldPath: spec.parameters.keycloakGroup
+          toFieldPath: spec.forProvider.values.jupyterhub.hub.config.GenericOAuthenticator.allowed_groups
+
+# these next resources are need to delete the autohttps pod in case the proxy is not ready
+    - name: jh-autohttps-killer-sa
+      base:
+        apiVersion: kubernetes.crossplane.io/v1alpha1
+        kind: Object
+        spec:
+          forProvider:
+            manifest:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                labels:
+                  app.kubernetes.io/managed-by: crossplane
+                name: podminator
+                namespace: oss
+      patches:
+        - type: PatchSet
+          patchSetName: common-fields
+        - type: PatchSet
+          patchSetName: optional-fields
+        - fromFieldPath: spec.project.name
+          toFieldPath: spec.forProvider.manifest.metadata.namespace
+          transforms:
+            - type: string
+              string:
+                fmt: "oss-%s"
+
+    - name: jh-autohttps-killer-cr
+      base:
+        apiVersion: kubernetes.crossplane.io/v1alpha1
+        kind: Object
+        metadata:
+          name: podminator-cr
+        spec:
+          forProvider:
+            manifest:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRole
+              metadata:
+                name: pod-deleter
+              rules:
+              - apiGroups: [""]
+                resources: ["pods"]
+                verbs: ["list", "delete"]
+      patches:
+        - type: PatchSet
+          patchSetName: common-fields
+        - type: PatchSet
+          patchSetName: optional-fields
+
+    - name: jh-autohttps-killer-crb
+      base:
+        apiVersion: kubernetes.crossplane.io/v1alpha1
+        kind: Object
+        metadata:
+          name: podminator-crb
+        spec:
+          forProvider:
+            manifest:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: pod-deleter-binding
+              subjects:
+              - kind: ServiceAccount
+                name: podminator
+                namespace: oss-example
+              roleRef:
+                kind: ClusterRole
+                name: pod-deleter
+                apiGroup: rbac.authorization.k8s.io
+      patches:
+        - type: PatchSet
+          patchSetName: common-fields
+        - type: PatchSet
+          patchSetName: optional-fields
+        - fromFieldPath: spec.project.name
+          toFieldPath: spec.forProvider.manifest.subjects[0].namespace
+          transforms:
+            - type: string
+              string:
+                fmt: "oss-%s"
+
+    - name: jh-autohttps-killer-job
+      base:
+        apiVersion: kubernetes.crossplane.io/v1alpha1
+        kind: Object
+        metadata:
+          name: podminator-job
+        spec:
+          forProvider:
+            manifest:
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: pod-terminator
+                namespace: oss-example
+              spec:
+                template:          
+                  spec:
+                    serviceAccountName: podminator
+                    containers:
+                    - name: pod-terminator
+                      image: bitnami/kubectl
+                      command: ["/bin/sh", "-c","sleep 300; kubectl delete pod -n oss-example -l component=autohttps >&2;"]
+                    restartPolicy: Never
+                backoffLimit: 4
+      patches:
+        - type: PatchSet
+          patchSetName: common-fields
+        - type: PatchSet
+          patchSetName: optional-fields
+        - fromFieldPath: spec.project.name
+          toFieldPath: spec.forProvider.manifest.metadata.namespace
+          transforms:
+            - type: string
+              string:
+                fmt: "oss-%s"
+        - fromFieldPath: spec.project.name
+          toFieldPath: spec.forProvider.manifest.spec.template.spec.containers[0].command[2]
+          transforms:
+            - type: string
+              string:
+                fmt: "sleep 120; kubectl delete pod -n oss-%s -l component=autohttps >&2;"

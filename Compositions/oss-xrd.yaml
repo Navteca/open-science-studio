@@ -1,0 +1,149 @@
+# Copyright Navteca LLC.
+# SPDX-License-Identifier: Apache-2.0
+# This is the XRD for the OSS Composition, it defines the OSS Composition and the parameters that can be used to deploy the OSS
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xossobjects.navteca.io
+spec:
+  claimNames:
+    kind: OSSObject
+    plural: ossobjects 
+  group: navteca.io
+  names:
+    kind: XOSSObject
+    plural: xossobjects
+  connectionSecretKeys:
+    - region
+    - project
+    - projectName
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          properties: 
+            spec:
+              description: OSSObjectSpec defines the desired state of OSSObject
+              properties:
+                parameters:
+                  description: Parameters to collect information about the deployment
+                  type: object
+                  properties:
+                    oidcProviderID:
+                      description: The OIDC provider ID
+                      type: string
+                    domainName:
+                      description: The domain name
+                      type: string
+                    userPoolID:
+                      description: The user pool ID
+                      type: string
+                    cognitoDomain:
+                      description: The cognito domain that provides userinfo, token, etc
+                      type: string
+                    notebookSize:
+                      description: The size of the notebook ebs volume
+                      type: string
+                      default: 10Gi
+                    keycloakClientID:
+                      description: The keycloak client ID
+                      type: string
+                    keycloakClientSecret:
+                      description: The keycloak client secret
+                      type: string
+                    keycloakGroup:
+                      description: The keycloak group array
+                      items:
+                        type: string
+                      type: array
+                  required:
+                  - oidcProviderID
+                  - domainName
+                project:
+                  description: Information about the project
+                  type: object
+                  properties:
+                    name:
+                      description: The name of the project which must be unique per cloud account and UCP
+                      type: string
+                    cloudAccount:
+                      description: The name of the cloud account
+                      type: string
+                    clusterName:
+                      description: The name of the cluster
+                      type: string
+                    contactEmail:
+                      description: The email address of the project owner, will be use for let's encrypt
+                      type: string
+                  required:
+                  - name
+                  - cloudAccount
+                  - clusterName
+                  - contactEmail
+                resourceConfig:
+                  description: ResourceConfig defines general properties of this AWS resource.
+                  properties:
+                    deletionPolicy:
+                      description: Defaults to Delete
+                      enum:
+                      - Delete
+                      - Orphan
+                      type: string
+                    name:
+                      description: Set the name of this resource in AWS to the value
+                        provided by this field.
+                      type: string
+                    region:
+                      type: string
+                    tags:
+                      description: Tags is a collection of tags to apply to this resource.
+                      items:
+                        properties:
+                          key:
+                            type: string
+                          value:
+                            type: string
+                        required:
+                        - key
+                        - value
+                        type: object
+                      type: array
+                  required:
+                  - region
+                  - tags
+                  type: object
+              required:
+              - project
+              - resourceConfig
+              type: object
+            status:
+              description: OSSObjectStatus defines the observed state of OSSObject
+              properties:
+                projectName: 
+                  type: string
+                awsAccountId:
+                  type: string
+                bucketName:
+                  type: string
+                bucketArn:
+                  type: string
+                policyArn:
+                  type: string
+                policyArnCas:
+                  type: string
+                roleArnAS:
+                  type: string
+                roleNameAS:
+                  type: string
+                roleArnS3:
+                  type: string
+                roleNameS3:
+                  type: string
+                clientId:
+                  type: string
+                clientSecret:
+                  type: string
+              type: object
+          type: object

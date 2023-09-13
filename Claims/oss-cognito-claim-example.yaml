@@ -1,0 +1,32 @@
+# Copyright navteca.com, LLC. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+# This deploys a fully functional OSS on AWS EKS using Cognito as an authenticator.
+apiVersion: navteca.io/v1alpha1
+kind: OSSObject
+metadata:
+  name: example-oss # <-- name of the object (whatever you want to call it)
+  namespace: example-oss #  <-- namespace where the object is deployed
+spec:
+  compositionSelector:
+    matchLabels:
+      # This is the label that will be used to select the OSS composition to deploy using Cognito
+      navteca.io/provider: aws # <-- Cloud Provider, currently only AWS is supported
+      navteca.io/environment: oss # <-- Environment
+      oss.navteca.io/configuration: cognito # <-- Cognito Authenticator configuration
+      oss.navteca.io/version: v1 # <-- OSS version
+  parameters:
+    oidcProviderID: example-eks-cluster-oidc-provider-id # <-- OIDC provider ID for the EKS cluster
+    domainName: "example.com" # <-- domain name for the OSS deployment
+    userPoolID: us-east-1_a1b2c3d4e5 # <-- Cognito user pool ID
+    cognitoDomain: https://example-oss.auth.us-east-1.amazoncognito.com/ # <-- Cognito user pool domain that provides userinfo, token, etc
+  project: 
+    name: example-project-name # <-- name of the project
+    cloudAccount: example-aws-account # <-- Multi AWS account support
+    clusterName: example-cluster-name # <-- name of the cluster where OSS is being deployed
+    contactEmail: "john.doe@example.com" # <-- email address for notifications about Let's encrypt certificate
+  resourceConfig:
+
+    region: us-east-1 # <-- AWS region where OSS is being deployed
+    tags: # <-- tags for the resources created by the OSS
+      - key: example-tag # <-- tag key
+        value: example-value # <-- tag value

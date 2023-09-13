@@ -1,0 +1,35 @@
+# Copyright navteca.com, LLC. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+# This deploys a fully functional OSS on AWS EKS using Keycloak as an authenticator.
+apiVersion: navteca.io/v1alpha1
+kind: OSSObject
+metadata:
+  name: example-oss # <-- name of the object (whatever you want to call it)
+  namespace: example-oss #  <-- namespace where the object is deployed
+spec:
+  compositionSelector:
+    matchLabels:
+      # This is the label that will be used to select the OSS composition to deploy using Keycloak
+      navteca.io/provider: aws # <-- Cloud Provider, currently only AWS is supported
+      navteca.io/environment: oss # <-- Environment label 
+      oss.navteca.io/configuration: keycloak # <-- Keycloak Authenticator configuration 
+      oss.navteca.io/version: v1 # <-- OSS version, currently only v1 is supported
+  parameters:
+    oidcProviderID: example-eks-cluster-oidc-provider-id # <-- OIDC provider ID for the EKS cluster
+    domainName: "example.com" # <-- domain name for the OSS deployment
+    keycloakClientID: example-client-id # <-- Keycloak client ID
+    keycloakClientSecret: example-client-secret # <-- Keycloak client secret
+    cognitoDomain: "https://keycloak.example.com/realms/oss" # <-- Yes, we know it says cognito, but this references the Keycloak realm
+    notebookSize: 10Gi # <-- Size for the Jupyter notebook deployment
+    keycloakGroup:
+      - example-group # <-- Keycloak user group
+  project: 
+    name: example-project-name # <-- name of the project
+    cloudAccount: example-aws-account # <-- AWS account label/type
+    clusterName: example-cluster-name # <-- name of the cluster where OSS is being deployed
+    contactEmail: "john.doe@example.com" # <-- email address for notifications
+  resourceConfig:
+    region: us-east-1 # <-- AWS region where OSS is being deployed
+    tags: # <-- tags for the resources created by the OSS
+      - key: example-tag # <-- tag key
+        value: example-value # <-- tag value
